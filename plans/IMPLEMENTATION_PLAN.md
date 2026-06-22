@@ -4,6 +4,130 @@
 
 ---
 
+## Critical Questions Answered
+
+### Q1: How do users connect different LLM providers?
+
+**Answer:** OpenCode (the AI agent) handles LLM provider configuration, NOT our skill file. Users configure their preferred LLM provider through OpenCode's configuration.
+
+**How it works:**
+
+```mermaid
+flowchart LR
+    subgraph UserConfig[User Configuration]
+        ENV[Environment Variables]
+        OCConfig[opencode.json]
+    end
+
+    subgraph OpenCode[OpenCode Agent]
+        LLMClient[LLM Client]
+    end
+
+    subgraph Providers[LLM Providers]
+        OpenAI[OpenAI API]
+        Anthropic[Anthropic Claude]
+        Gemini[Google Gemini]
+        Custom[Custom OpenAI-Compatible]
+        Local[Ollama/LM Studio]
+    end
+
+    ENV --> LLMClient
+    OCConfig --> LLMClient
+    LLMClient --> OpenAI
+    LLMClient --> Anthropic
+    LLMClient --> Gemini
+    LLMClient --> Custom
+    LLMClient --> Local
+```
+
+**User Configuration Options:**
+
+| Provider | Configuration | Example |
+|----------|---------------|---------|
+| **OpenAI** | `OPENAI_API_KEY` env var | `export OPENAI_API_KEY="sk-..."` |
+| **Anthropic** | `ANTHROPIC_API_KEY` env var | `export ANTHROPIC_API_KEY="sk-..."` |
+| **Gemini** | `GEMINI_API_KEY` env var | `export GEMINI_API_KEY="..."` |
+| **Custom OpenAI-Compatible** | `OPENAI_API_KEY` + `OPENAI_BASE_URL` | `export OPENAI_BASE_URL="https://your-endpoint/v1"` |
+| **Local (Ollama)** | No API key needed | Runs on `localhost:11434` |
+
+**For GitHub Actions, users set secrets:**
+
+```yaml
+# In their repository settings → Secrets and variables → Actions
+secrets:
+  OPENAI_API_KEY: "sk-..."        # For OpenAI
+  ANTHROPIC_API_KEY: "sk-..."     # For Claude
+  GEMINI_API_KEY: "..."           # For Gemini
+```
+
+**The skill file doesn't need to know about LLM providers** - it just calls `context.llm.complete()` and OpenCode handles the rest.
+
+---
+
+### Q2: How does MCP connect to OpenCode in GitHub Actions?
+
+**Answer:** The MCP server runs INSIDE the GitHub Actions workflow, and OpenCode connects to it via stdio (standard input/output).
+
+**Architecture in GitHub Actions:**
+
+```mermaid
+flowchart TB
+    subgraph GitHubActions[GitHub Actions Workflow]
+        subgraph Step1[Step 1: Setup]
+            Checkout[Checkout Code]
+            InstallPython[Install Python + Graphify]
+            BuildGraph[Build Graph: graphify update .]
+        end
+
+        subgraph Step2[Step 2: Run OpenCode]
+            StartMCP[Start MCP Server: graphify-mcp]
+            StartOC[Start OpenCode Agent]
+            RunSkill[Run graphify-review.js Skill]
+        end
+
+        subgraph Communication[Communication]
+            Stdio[stdio JSON-RPC]
+        end
+
+        Checkout --> InstallPython --> BuildGraph
+        BuildGraph --> StartMCP
+        StartMCP --> Stdio
+        StartOC --> Stdio
+        Stdio --> RunSkill
+    end
+
+    subgraph External[External Services]
+        GitHubAPI[GitHub API]
+        LLMProvider[LLM Provider API]
+    end
+
+    RunSkill --> GitHubAPI
+    RunSkill --> LLMProvider
+```
+
+**How it works step-by-step:**
+
+1. **GitHub Actions workflow starts** (triggered by PR or comment)
+2. **Setup steps run:**
+   - Checkout code
+   - Install Python and Graphify: `pip install "graphifyy[mcp,pdf]"`
+   - Build the graph: `graphify update .`
+3. **OpenCode starts** with configuration that includes:
+   - MCP server definition for Graphify
+   - LLM provider credentials (from secrets)
+4. **MCP server starts** as a subprocess of OpenCode:
+   - OpenCode spawns `graphify-mcp graphify-out/graph.json`
+   - Communication happens via stdin/stdout using JSON-RPC 2.0
+5. **Skill executes** and calls MCP tools:
+   - Skill calls `context.mcp.call("graphify", "get_pr_impact", {...})`
+   - OpenCode sends JSON-RPC request to MCP server via stdin
+   - MCP server processes request and sends response via stdout
+   - OpenCode returns result to skill
+
+**The key insight:** OpenCode and the MCP server run IN THE SAME GitHub Actions job. No network connection needed - they communicate via stdio.
+
+---
+
 ## Overview
 
 This document explains exactly how to build GraphiView - a system that performs **pre-merge architectural analysis** on pull requests using Graphify's knowledge graphs and OpenCode AI agent.
@@ -405,6 +529,321 @@ jobs:
         - name: Install Graphify skill
           run: graphify install --platform opencode
 ```
+
+---
+
+## TWO Different LLM Configurations
+
+### Important Distinction
+
+There are **TWO separate LLM configurations** in this system:
+
+| Configuration | Purpose | When Used | Configured By |
+|---------------|---------|-----------|---------------|
+| **Graphify LLM** | Enrich graph with semantic relationships from docs/images | During `graphify .` (graph building) | User's environment or GitHub Actions |
+| **OpenCode LLM** | Generate human-readable PR comments | During skill execution | OpenCode's configuration |
+
+```mermaid
+flowchart TB
+    subgraph GraphBuilding[Graph Building Phase]
+        GB[graphify .]
+        GLM[Graphify LLM Provider]
+        Docs[Docs/Images]
+        Graph[graph.json]
+    end
+
+    subgraph PRReview[PR Review Phase]
+        Skill[graphify-review.js Skill]
+        OLM[OpenCode LLM Provider]
+        Comment[PR Comment]
+    end
+
+    Docs --> GLM
+    GLM --> GB
+    GB --> Graph
+    Graph --> Skill
+    Skill --> OLM
+    OLM --> Comment
+```
+
+### 1. Graphify LLM Provider (For Graph Building)
+
+**When is this needed?**
+- Only if you want to enrich the graph with semantic relationships from docs, images, and PDFs
+- NOT needed for code-only extraction (`graphify update .`)
+
+**How to configure in GitHub Actions:**
+
+```yaml
+# .github/workflows/opencode.yml
+
+jobs:
+  review:
+    # ... existing configuration ...
+    
+    with:
+      audience: ${{ vars.OPENCODE_GATEWAY_AUDIENCE }}
+      
+      # Pre-steps to build the graph
+      pre-steps: |
+        - name: Set up Python
+          uses: actions/setup-python@v5
+          with:
+            python-version: '3.10'
+        
+        - name: Install Graphify
+          run: pip install "graphifyy[mcp,pdf]"
+        
+        # OPTIONAL: Configure custom LLM provider for graph enrichment
+        - name: Configure Graphify LLM Provider (Optional)
+          if: ${{ secrets.GRAPHIFY_LLM_PROVIDER != '' }}
+          env:
+            GRAPHIFY_PROVIDER_CONFIG: ${{ secrets.GRAPHIFY_LLM_PROVIDER }}
+          run: |
+            # Parse provider config and register it
+            if [ -n "$GRAPHIFY_PROVIDER_CONFIG" ]; then
+              echo "$GRAPHIFY_PROVIDER_CONFIG" | python -c "
+            import sys, json
+            config = json.load(sys.stdin)
+            import subprocess
+            subprocess.run([
+              'graphify', 'provider', 'add', config['name'],
+              '--base-url', config['base_url'],
+              '--default-model', config['model'],
+              '--env-key', config['env_key']
+            ])
+              "
+            fi
+        
+        - name: Build knowledge graph
+          env:
+            # For code-only extraction (no LLM needed)
+            # GRAPHIFY_LLM_PROVIDER: ""  # Not needed for code-only
+            
+            # For full extraction with LLM enrichment
+            # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+            # GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+            # Or custom provider key
+            OPENAI_API_KEY: ${{ secrets.GRAPHIFY_LLM_API_KEY }}
+          run: |
+            # Code-only (no LLM needed, faster)
+            graphify update .
+            
+            # OR full extraction with LLM enrichment (requires API key)
+            # graphify . --backend kivoyo
+        
+        - name: Install Graphify skill
+          run: graphify install --platform opencode
+```
+
+**Repository Secrets for Graphify LLM:**
+
+| Secret | Description | Example Value |
+|--------|-------------|---------------|
+| `GRAPHIFY_LLM_API_KEY` | API key for Graphify's LLM | `sk-...` |
+| `GRAPHIFY_LLM_PROVIDER` | JSON config for custom provider | `{"name":"kivoyo","base_url":"https://...","model":"gpt-4","env_key":"OPENAI_API_KEY"}` |
+
+**Example: Using Custom OpenAI-Compatible Provider**
+
+```yaml
+# Set in repository secrets:
+# GRAPHIFY_LLM_PROVIDER = '{"name":"kivoyo","base_url":"https://api.kivoyo.com/v1","model":"claude-3-opus","env_key":"OPENAI_API_KEY"}'
+# GRAPHIFY_LLM_API_KEY = 'your-api-key'
+
+- name: Configure and Build with Custom Provider
+  env:
+    GRAPHIFY_LLM_PROVIDER: ${{ secrets.GRAPHIFY_LLM_PROVIDER }}
+    OPENAI_API_KEY: ${{ secrets.GRAPHIFY_LLM_API_KEY }}
+  run: |
+    # Register custom provider
+    echo "$GRAPHIFY_LLM_PROVIDER" | python -c "
+    import sys, json
+    config = json.load(sys.stdin)
+    import subprocess
+    subprocess.run([
+      'graphify', 'provider', 'add', config['name'],
+      '--base-url', config['base_url'],
+      '--default-model', config['model'],
+      '--env-key', config['env_key']
+    ])
+    "
+    
+    # Build graph with custom provider
+    graphify . --backend kivoyo
+```
+
+### 2. OpenCode LLM Provider (For PR Comments)
+
+**When is this needed?**
+- Always needed - this is what generates the human-readable PR comments
+
+**How it's configured:**
+- OpenCode reads LLM configuration from environment variables or its config file
+- The skill file calls `context.llm.complete()` and OpenCode handles the rest
+
+**Configuration in GitHub Actions:**
+
+```yaml
+# OpenCode LLM is configured via environment variables
+# These are set in the reusable workflow from ADORSYS-GIS/ai-governance
+
+# The reusable workflow handles:
+# - OPENAI_API_KEY (for OpenAI)
+# - ANTHROPIC_API_KEY (for Claude)
+# - GEMINI_API_KEY (for Gemini)
+# - Or custom provider via OPENAI_BASE_URL
+```
+
+**For users using custom OpenAI-compatible providers:**
+
+```yaml
+# In repository settings → Secrets and variables → Actions
+secrets:
+  OPENAI_API_KEY: "your-custom-api-key"
+  OPENAI_BASE_URL: "https://your-custom-endpoint/v1"
+```
+
+### Summary: Two LLM Configurations
+
+| Aspect | Graphify LLM | OpenCode LLM |
+|--------|--------------|--------------|
+| **Purpose** | Enrich graph with docs/images | Generate PR comments |
+| **When Used** | `graphify .` (graph building) | Skill execution |
+| **Required?** | Optional (only for full extraction) | Required |
+| **Configured In** | GitHub Actions pre-steps | OpenCode config / env vars |
+| **Environment Vars** | `OPENAI_API_KEY`, `GEMINI_API_KEY`, or custom | Same, but read by OpenCode |
+| **Custom Provider** | `graphify provider add ...` | `OPENAI_BASE_URL` |
+
+---
+
+## LLM Provider Configuration
+
+### How Users Connect Different LLM Providers
+
+**Key Insight:** OpenCode (the AI agent) handles LLM provider configuration, NOT our skill file. Users configure their preferred LLM provider through OpenCode's configuration or environment variables.
+
+**Architecture:**
+
+```mermaid
+flowchart LR
+    subgraph UserConfig[User Configuration]
+        ENV[Environment Variables]
+        Secrets[GitHub Secrets]
+        OCConfig[opencode.json]
+    end
+
+    subgraph OpenCode[OpenCode Agent]
+        LLMClient[LLM Client - Built-in]
+    end
+
+    subgraph Providers[LLM Providers]
+        OpenAI[OpenAI API]
+        Anthropic[Anthropic Claude]
+        Gemini[Google Gemini]
+        Custom[Custom OpenAI-Compatible]
+        Local[Ollama/LM Studio]
+    end
+
+    ENV --> LLMClient
+    Secrets --> LLMClient
+    OCConfig --> LLMClient
+    LLMClient --> OpenAI
+    LLMClient --> Anthropic
+    LLMClient --> Gemini
+    LLMClient --> Custom
+    LLMClient --> Local
+```
+
+**Provider Configuration Options:**
+
+| Provider | Configuration | Example |
+|----------|---------------|---------|
+| **OpenAI** | `OPENAI_API_KEY` env var | `export OPENAI_API_KEY="sk-..."` |
+| **Anthropic** | `ANTHROPIC_API_KEY` env var | `export ANTHROPIC_API_KEY="sk-..."` |
+| **Gemini** | `GEMINI_API_KEY` env var | `export GEMINI_API_KEY="..."` |
+| **Custom OpenAI-Compatible** | `OPENAI_API_KEY` + `OPENAI_BASE_URL` | `export OPENAI_BASE_URL="https://your-endpoint/v1"` |
+| **Local (Ollama)** | No API key needed | Runs on `localhost:11434` |
+
+**For GitHub Actions, users set secrets:**
+
+```yaml
+# In repository settings → Secrets and variables → Actions
+secrets:
+  OPENAI_API_KEY: "sk-..."        # For OpenAI
+  ANTHROPIC_API_KEY: "sk-..."     # For Claude
+  GEMINI_API_KEY: "..."           # For Gemini
+```
+
+**The skill file doesn't need to know about LLM providers** - it just calls `context.llm.complete()` and OpenCode handles the rest.
+
+---
+
+## MCP Connection in GitHub Actions
+
+### How MCP Server Connects to OpenCode
+
+**Critical Understanding:** The MCP server runs INSIDE the same GitHub Actions job as OpenCode. They communicate via stdio (standard input/output), NOT over a network.
+
+**Architecture:**
+
+```mermaid
+flowchart TB
+    subgraph GitHubActions[GitHub Actions Job]
+        subgraph Setup[Step 1: Setup]
+            Checkout[Checkout Code]
+            InstallPython[Install Python + Graphify]
+            BuildGraph[Build Graph: graphify update .]
+        end
+
+        subgraph RunOpenCode[Step 2: Run OpenCode]
+            StartMCP[Start MCP Server]
+            StartOC[Start OpenCode]
+            RunSkill[Run Skill]
+        end
+
+        subgraph Communication[Communication Layer]
+            Stdio[stdio - JSON-RPC 2.0]
+        end
+
+        Checkout --> InstallPython --> BuildGraph
+        BuildGraph --> StartMCP
+        StartMCP --> Stdio
+        StartOC --> Stdio
+        Stdio --> RunSkill
+    end
+```
+
+**Step-by-Step Connection:**
+
+1. **GitHub Actions workflow starts** (triggered by PR or comment)
+2. **Setup steps run:**
+   - Checkout code
+   - Install Python and Graphify: `pip install "graphifyy[mcp,pdf]"`
+   - Build the graph: `graphify update .`
+3. **OpenCode starts** with configuration from `.opencode/opencode.json`:
+   ```json
+   {
+     "mcp": {
+       "graphify": {
+         "type": "local",
+         "command": ["graphify-mcp", "graphify-out/graph.json"],
+         "enabled": true
+       }
+     }
+   }
+   ```
+4. **OpenCode spawns MCP server** as a subprocess:
+   - Runs `graphify-mcp graphify-out/graph.json`
+   - Communication via stdin/stdout using JSON-RPC 2.0
+5. **Skill executes** and calls MCP tools:
+   - Skill calls `context.mcp.call("graphify", "get_pr_impact", {...})`
+   - OpenCode sends JSON-RPC request to MCP server via stdin
+   - MCP server processes request and sends response via stdout
+   - OpenCode returns result to skill
+
+**Why the graph must be built BEFORE OpenCode starts:**
+- The MCP server needs `graphify-out/graph.json` to exist when it starts
+- If the file doesn't exist, the MCP server will fail to start
 
 ---
 
