@@ -1,37 +1,133 @@
-# opencode PR review / issue task — thin caller for the reusable workflow in
-# ADORSYS-GIS/ai-governance (ADR-0047 + ADR-0049). Auth to the AI gateway is the
-# repo's own GitHub-OIDC token validated by lightbridge-repo-auth (keyless); the
-# review is posted by github-actions[bot]. The whole job logic lives in the
-# reusable workflow — bump the pinned SHA deliberately to adopt a new version.
+# GraphiView Pre-Merge Architectural Review
 #
-# Needs the org/repo variable OPENCODE_GATEWAY_AUDIENCE (set org-wide for
-# ADORSYS-GIS = this org's lightbridge-repo-auth Source URL).
-name: opencode
+# This workflow runs Graphify's architectural review on pull requests.
+# It builds a knowledge graph from the code and uses OpenCode to analyze
+# architectural impact and post review comments.
+#
+# Requirements:
+# - Set OPENCODE_GATEWAY_AUDIENCE variable (org-wide for ADORSYS-GIS)
+# - Optionally set GRAPHIFY_LLM_API_KEY secret for graph enrichment
+# - Optionally set GRAPHIFY_LLM_PROVIDER secret for custom LLM provider
+#
+# For custom OpenAI-compatible providers, set:
+# - GRAPHIFY_LLM_PROVIDER: JSON config like {"name":"kivoyo","base_url":"https://...","model":"gpt-4"}
+# - GRAPHIFY_LLM_API_KEY: Your API key
+name: graphify-review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
   issue_comment:
     types: [created]
   pull_request_review_comment:
     types: [created]
 
+# Cancel in-progress runs when a new run is triggered
 concurrency:
-  group: opencode-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: graphify-review-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
-  review:
-    # No-op if the audience var isn't set (keeps unprepared forks/CI green).
-    if: ${{ vars.OPENCODE_GATEWAY_AUDIENCE != '' }}
-    # ADORSYS-GIS/ai-governance @ the opencode-review-reusable merge (PR #9).
-    uses: ADORSYS-GIS/ai-governance/.github/workflows/opencode-review.yml@2937e0c78659caa951b0d841e425e7f98fe4c565
+  # Job 1: Build the Graphify knowledge graph
+  build-graph:
+    runs-on: ubuntu-latest
+    outputs:
+      graph-ready: ${{ steps.build.outputs.success }}
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 📊 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: 📦 Install Graphify
+        run: |
+          pip install "graphifyy[mcp,pdf]"
+          graphify --version
+
+      - name: 🔧 Configure Graphify LLM Provider (Optional)
+        if: ${{ secrets.GRAPHIFY_LLM_PROVIDER != '' }}
+        env:
+          GRAPHIFY_PROVIDER_CONFIG: ${{ secrets.GRAPHIFY_LLM_PROVIDER }}
+        run: |
+          # Register custom LLM provider for graph enrichment
+          if [ -n "$GRAPHIFY_PROVIDER_CONFIG" ]; then
+            echo "$GRAPHIFY_PROVIDER_CONFIG" | python -c "
+          import sys, json
+          config = json.load(sys.stdin)
+          import subprocess
+          subprocess.run([
+            'graphify', 'provider', 'add', config['name'],
+            '--base-url', config['base_url'],
+            '--default-model', config['model'],
+            '--env-key', config['env_key']
+          ], check=True)
+            "
+            echo "✅ Configured custom LLM provider: $(echo $GRAPHIFY_PROVIDER_CONFIG | python -c 'import sys,json; print(json.load(sys.stdin)[\"name\"])')"
+          fi
+
+      - name: 🏗️ Build knowledge graph
+        id: build
+        env:
+          OPENAI_API_KEY: ${{ secrets.GRAPHIFY_LLM_API_KEY }}
+        run: |
+          # Build code-only graph (fast, no LLM needed)
+          # This extracts functions, classes, calls, imports using tree-sitter
+          graphify update .
+          
+          # Alternative: Build full graph with LLM enrichment (requires API key)
+          # This also processes docs, images, PDFs for semantic relationships
+          # graphify . --backend kivoyo
+          
+          if [ -f "graphify-out/graph.json" ]; then
+            echo "✅ Graph file created"
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Graph file not found"
+            echo "success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: 📤 Upload graph artifact
+        if: steps.build.outputs.success == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphify-graph
+          path: graphify-out/graph.json
+          retention-days: 1
+
+      - name: 📋 Display graph stats
+        if: steps.build.outputs.success == 'true'
+        run: |
+          echo "📊 Graph statistics:"
+          graphify check-update || true
+          echo ""
+          echo "📁 Graph file size:"
+          ls -lh graphify-out/graph.json || echo "Not found"
+
+  # Job 2: Run OpenCode review with Graphify MCP integration
+  opencode-review:
+    needs: build-graph
+    if: ${{ vars.OPENCODE_GATEWAY_AUDIENCE != '' && needs.build-graph.outputs.graph-ready == 'true' }}
+    
+    # Use the reusable workflow from ADORSYS-GIS/ai-governance
+    uses: ADORSYS-GIS/ai-governance/.github/workflows/opencode-review.yml@a887e7622d0bec0acff4ce5975229845daa90767
+    
     permissions:
-      id-token: write # mint the GHA OIDC token (gateway auth)
-      contents: write # checkout + the action's git ops
-      pull-requests: write # post the review
-      issues: write # post issue-task / failure comments
+      id-token: write        # Mint the GHA OIDC token (gateway auth)
+      contents: write        # Checkout + git ops
+      pull-requests: write   # Post the review
+      issues: write          # Post issue-task / failure comments
+    
     with:
       audience: ${{ vars.OPENCODE_GATEWAY_AUDIENCE }}
-      # Models default in the reusable workflow: auto=adorsys-reviewer,
-      # manual+issue=adorsys-reviewer-pro. Override here only to diverge.
+      # Use the manual review model for /opencode comments
+      manual_model: "camer-digital/adorsys-reviewer-pro"
+      # Use the auto review model for PR events
+      auto_model: "camer-digital/adorsys-reviewer"
+      issue_model: "camer-digital/adorsys-reviewer-pro"
