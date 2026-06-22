@@ -1,229 +1,157 @@
 # GraphiView
 
-> **Pre-merge architectural review using Graphify knowledge graphs**
-
-[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/your-org/graphiview/graphify-review.yml?branch=main&label=review)](https://github.com/your-org/graphiview/actions/workflows/graphify-review.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
----
+Pre-merge architectural review for pull requests using Graphify knowledge graphs and AI agents.
 
 ## What is GraphiView?
 
-GraphiView automatically analyzes your pull requests for **architectural risks** before they merge. It uses Graphify's knowledge graphs to detect:
+GraphiView analyzes pull requests by building a knowledge graph of your codebase and using AI to assess architectural impact. It identifies:
 
-| Risk Type | Description | Example |
-|-----------|-------------|---------|
-| **Blast Radius** | How many nodes are affected by changes | Changing `auth.py` affects 47 files |
-| **God Nodes** | High-centrality files that need extra scrutiny | `utils.js` has betweenness centrality > 0.70 |
-| **Community Sprawl** | Changes spread across too many modules | PR touches UI, DB, and Analytics |
-| **Circular Dependencies** | New cycles introduced | A → B → C → A |
-| **Layering Violations** | Cross-layer coupling | UI directly imports from DB |
-
----
+- **Blast radius**: How many nodes are affected by changes
+- **God nodes**: Whether highly-connected components are modified
+- **Community sprawl**: How many code clusters are touched
+- **Circular dependencies**: New cycles introduced by changes
+- **Layering violations**: Architecture boundary crossings
 
 ## Quick Start
 
-Get started in 5 minutes:
-
 ### 1. Add workflow file
 
-```bash
-mkdir -p .github/workflows
-cp .github/workflows/graphify-review.yml your-repo/.github/workflows/
-```
+Create `.github/workflows/opencode.yml` in your repository (see [Workflow Configuration](#workflow-configuration))
 
-### 2. Add OpenCode configuration
+### 2. Add agent instructions
 
-```bash
-cp -r .opencode your-repo/
-```
+Create `AGENTS.md` in your repository root (see [Agent Instructions](#agent-instructions))
 
 ### 3. Set required variable
 
-In your repository settings (Settings → Secrets and variables → Actions):
+In your repository settings → **Settings** → **Secrets and variables** → **Actions** → **Variables**:
 
-- `OPENCODE_GATEWAY_AUDIENCE` = your organization's OpenCode gateway URL
+Add `OPENCODE_GATEWAY_AUDIENCE` with your AI gateway URL
 
 ### 4. Create a PR
 
-The review will appear automatically! 🎉
-
-📖 **[Full Quick Start Guide](docs/QUICKSTART.md)**
-
----
+The workflow will automatically trigger on PR events, or you can manually trigger with:
+- `/opencode` or `/oc` comment on any PR
 
 ## How It Works
 
-```mermaid
-flowchart TB
-    subgraph GitHub
-        PR[Pull Request]
-        Comment[PR Comment]
-    end
-
-    subgraph GitHubActions[GitHub Actions]
-        Checkout[Checkout Code]
-        BuildGraph[Build Graph]
-        StartMCP[Start MCP Server]
-        RunSkill[Run Skill]
-    end
-
-    subgraph OpenCode[OpenCode Agent]
-        Skill[graphify-review.js]
-        LLM[LLM Provider]
-    end
-
-    subgraph Graphify[Graphify MCP]
-        Tools[MCP Tools]
-        Graph[graph.json]
-    end
-
-    PR --> Checkout
-    Checkout --> BuildGraph
-    BuildGraph --> Graph
-    Graph --> Tools
-    Tools --> StartMCP
-    StartMCP --> RunSkill
-    RunSkill --> Skill
-    Skill --> LLM
-    LLM --> Skill
-    Skill --> Comment
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│   PR Event  │────►│  Build Graph │────►│  Run Review │
+│  (GitHub)   │     │  (Graphify)  │     │  (OpenCode) │
+└─────────────┘     └──────────────┘     └─────────────┘
+                                                 │
+                                                 ▼
+                                          ┌─────────────┐
+                                          │ Post Comment│
+                                          │  (GitHub)   │
+                                          └─────────────┘
 ```
 
-1. **PR Created** → GitHub Actions triggers
-2. **Build Graph** → Graphify extracts code structure
-3. **MCP Server** → Exposes graph tools
-4. **Skill Runs** → Analyzes architectural impact
-5. **LLM Generates** → Creates human-readable report
-6. **PR Comment** → Posted automatically
+1. **PR Event**: Workflow triggers on `pull_request` or `/opencode` comment
+2. **Build Graph**: `graphify update .` creates knowledge graph from code
+3. **Run Review**: OpenCode agents use Graphify MCP tools to analyze impact
+4. **Post Comment**: AI-generated architectural review appears on PR
 
----
+## 📊 GraphiView Architectural Review
 
-## Example Output
+When everything works, you'll see PR comments like:
 
 ```markdown
 ## 📊 GraphiView Architectural Review
 
-**Overall risk:** 🟡 **MEDIUM** (score: 0.45)
+**Overall risk:** 🟢 LOW | 🟡 MEDIUM | 🔴 HIGH
 
 ### Key Findings
 
-- ⚠️ **Moderate blast radius:** 12 nodes affected
-- 🔴 **God nodes modified:** `auth.py` - requires careful review
-- 📊 **Moderate sprawl:** Changes touch 2 communities
-- ✅ **No circular dependencies introduced**
-- ✅ **No layering violations**
+- **Blast radius:** X nodes affected
+- **God nodes modified:** Y (list them)
+- **Communities touched:** Z
+- **New circular dependencies:** N
+- **Layering violations:** M
 
 ### Recommendations
 
-- ⚠️ **Extra review required for god node modifications**
-- ✅ **Add tests for affected areas**
+- [Specific actionable items]
 
 ---
-*Generated by GraphiView*
+*Generated by [GraphiView](https://github.com/your-org/graphiview)*
 ```
-
----
-
-## Configuration
 
 ### Risk Thresholds
 
-Customize in `.opencode/opencode.json`:
-
-```json
-{
-  "graphifyReview": {
-    "riskThresholds": {
-      "low": 0.3,
-      "medium": 0.6,
-      "high": 1.0
-    },
-    "godNodeThreshold": 0.70,
-    "sprawlThreshold": 3,
-    "blastRadiusThreshold": 15
-  }
-}
-```
+| Metric | Low Risk | Medium Risk | High Risk |
+|--------|----------|-------------|-----------|
+| Blast Radius | < 5 nodes | 5-15 nodes | > 15 nodes |
+| God Nodes Modified | 0 | 1-2 | > 2 |
+| Communities Touched | 1 | 2-3 | > 3 |
+| New Cycles | 0 | 1-2 | > 2 |
+| Layering Violations | 0 | 1-3 | > 3 |
 
 ### LLM Providers
 
-Supports multiple LLM providers:
+GraphiView works with any OpenAI-compatible LLM provider:
 
-| Provider | Environment Variable |
-|----------|---------------------|
-| OpenAI | `OPENAI_API_KEY` |
-| Anthropic | `ANTHROPIC_API_KEY` |
-| Gemini | `GEMINI_API_KEY` |
-| Custom | `OPENAI_BASE_URL` + `OPENAI_API_KEY` |
-
----
+- **Default**: Uses the AI gateway configured via `OPENCODE_GATEWAY_AUDIENCE`
+- **Custom**: Set `GRAPHIFY_LLM_PROVIDER` secret for custom providers
+- **Graph Enrichment**: Optional LLM for processing docs/images (set `GRAPHIFY_LLM_API_KEY`)
 
 ## Project Structure
 
 ```
 graphiview/
-├── .github/
-│   └── workflows/
-│       └── graphify-review.yml    # GitHub Actions workflow
+├── .github/workflows/
+│   └── opencode.yml          # GitHub Actions workflow
 ├── .opencode/
-│   ├── opencode.json              # OpenCode configuration
+│   ├── opencode.json         # OpenCode configuration (optional)
 │   └── plugins/
-│       └── graphify-review.js     # Skill file
+│       └── graphify-review.js # Custom skill (optional)
 ├── docs/
-│   ├── QUICKSTART.md              # Quick start guide
-│   ├── ARCHITECTURE.md            # Architecture documentation
-│   ├── PROBLEM_STATEMENT.md       # Problem we're solving
-│   ├── SOLUTION.md                # Our solution
-│   └── graphifysetup/
-│       └── graphifyinstall.md     # Graphify setup guide
+│   ├── TESTING.md            # Testing guide
+│   ├── QUICKSTART.md         # Quick start guide
+│   ├── ARCHITECTURE.md       # Technical architecture
+│   ├── AGENT_INTEGRATION.md  # Agent integration details
+│   ├── METRICS.md            # Metrics reference
+│   ├── PROBLEM_STATEMENT.md  # Problem statement
+│   ├── SOLUTION.md           # Solution overview
+│   └── USAGE.md              # Usage guide
 ├── plans/
-│   └── IMPLEMENTATION_PLAN.md     # Detailed implementation plan
-└── README.md                      # This file
+│   └── IMPLEMENTATION_PLAN.md # Implementation plan
+├── AGENTS.md                 # Agent instructions (required)
+└── README.md                 # This file
 ```
-
----
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Quick Start](docs/QUICKSTART.md) | Get started in 5 minutes |
-| [Implementation Plan](plans/IMPLEMENTATION_PLAN.md) | Detailed architecture and implementation |
-| [Architecture](docs/ARCHITECTURE.md) | System architecture |
-| [Problem Statement](docs/PROBLEM_STATEMENT.md) | The problem we're solving |
-| [Solution](docs/SOLUTION.md) | Our solution approach |
-| [Graphify Setup](docs/graphifysetup/graphifyinstall.md) | How to set up Graphify |
-
----
+- [Testing Guide](docs/TESTING.md) - How to test and troubleshoot
+- [Quick Start](docs/QUICKSTART.md) - 5-minute setup guide
+- [Architecture](docs/ARCHITECTURE.md) - Technical architecture
+- [Agent Integration](docs/AGENT_INTEGRATION.md) - How agents work
+- [Metrics](docs/METRICS.md) - Risk scoring details
+- [Usage](docs/USAGE.md) - Command reference
 
 ## Requirements
 
-- GitHub repository with Actions enabled
-- `OPENCODE_GATEWAY_AUDIENCE` variable set
-- (Optional) LLM API key for graph enrichment
-
----
+- **GitHub Actions**: For workflow execution
+- **OpenCode Gateway**: AI gateway access (via `OPENCODE_GATEWAY_AUDIENCE`)
+- **Graphify**: Python package for graph building (installed by workflow)
+- **Python 3.10+**: Required by Graphify
 
 ## Contributing
-
-Contributions are welcome! Please:
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
 4. Submit a pull request
 
----
+The workflow will automatically review your PR for architectural impact.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
----
+MIT
 
 ## Acknowledgments
 
-- [Graphify](https://github.com/safishamsi/graphify) - Knowledge graph extraction
+- [Graphify](https://github.com/your-org/graphify) - Knowledge graph builder
 - [OpenCode](https://opencode.ai) - AI agent platform
 - [ADORSYS-GIS/ai-governance](https://github.com/ADORSYS-GIS/ai-governance) - Reusable workflow
